@@ -27,7 +27,16 @@ services:
       XLabApiSettings__Kafka__MailTopic__Enabled: "true"
       XLabApiSettings__XlabAuth__BaseUrl: ${XLAB_AUTH_URL:-}
       XLabApiSettings__Security__AllowedOrigins__0: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
-      XLabApiSettings__Security__CertificatePassword: ${XLabApiSettings__Security__CertificatePassword:?Set XLabApiSettings__Security__CertificatePassword}
+      OPENIDDICT_PFX_BASE64: ${OPENIDDICT_PFX_BASE64:?Set OPENIDDICT_PFX_BASE64}
+      OPENIDDICT_PFX_PASSWORD: ${OPENIDDICT_PFX_PASSWORD:?Set OPENIDDICT_PFX_PASSWORD}
+      XLabApiSettings__OfflineLicense__PrivateKey: ${XLabApiSettings__OfflineLicense__PrivateKey:?Set XLabApiSettings__OfflineLicense__PrivateKey}
+      XLabApiSettings__OfflineLicense__Document: ${XLabApiSettings__OfflineLicense__Document:?Set XLabApiSettings__OfflineLicense__Document}
+      XLabApiSettings__OfflineLicense__AdminLogin: ${XLabApiSettings__OfflineLicense__AdminLogin:?Set XLabApiSettings__OfflineLicense__AdminLogin}
+      XLabApiSettings__OfflineLicense__AdminPassword: ${XLabApiSettings__OfflineLicense__AdminPassword:?Set XLabApiSettings__OfflineLicense__AdminPassword}
+      XLabApiSettings__LicenseService__BaseUrl: ""
+      XLabApiSettings__LicenseService__HmacKey: ""
+      XLabApiSettings__LicenseService__HmacKeyPrevious: ""
+      XLabApiSettings__Security__LicenseServiceClientSecret: ""
       MSSQL_DATABASES: "${MSSQL_DATABASES:?Set MSSQL_DATABASES}"
       MSSQL_XLAB_PASSWORD: "${MSSQL_XLAB_PASSWORD:?Set MSSQL_XLAB_PASSWORD}"
     # Build the API connection strings from MSSQL_DATABASES, then start the image entrypoint.
@@ -95,19 +104,8 @@ services:
       XL_API_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
       XL_AUTH_URL: ${XLAB_AUTH_URL:-}
       XL_OAUTH_CLIENT_ID: ${XL_OAUTH_CLIENT_ID:-}
-      XL_RECAPTCHA_SITE_KEY: ${XL_RECAPTCHA_SITE_KEY:-}
-      XL_GTM_ID: ${XL_GTM_ID:-}
-      XL_DIAGNOSTICS: ${XL_DIAGNOSTICS:-}
       XL_MESSAGE_HUB_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/messageHub
       XLAB_AUTH_URL: ${XLAB_AUTH_URL:-}
-      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:-}
-      RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-false}
-      RECAPTCHA_MIN_SCORE: ${RECAPTCHA_MIN_SCORE:-0.5}
-      KANEO_BASE_URL: ${KANEO_BASE_URL:-}
-      KANEO_API_KEY: ${KANEO_API_KEY:-}
-      KANEO_PROJECT_ID: ${KANEO_PROJECT_ID:-}
-      KANEO_STATUS_SLUG: ${KANEO_STATUS_SLUG:-backlog}
-      UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET:-}
     expose:
       - "80"
     restart: unless-stopped
@@ -116,13 +114,28 @@ services:
     image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlabsignalrservice:latest
     pull_policy: always
     hostname: signalr
+    # Certificate subject is the host of SIGNALR_PUBLIC_URL. The image still expects HTTPS_DOMAINS.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        url="$${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}"
+        host="$${url#*://}"
+        host="$${host%%/*}"
+        host="$${host%%:*}"
+        case "$$host" in
+          ""|*[!A-Za-z0-9.-]*) echo "SIGNALR_PUBLIC_URL must be https://host" >&2; exit 1 ;;
+        esac
+        export HTTPS_DOMAINS="$$host"
+        exec /entrypoint.sh
     environment:
-      HTTPS_DOMAINS: ${SIGNALR_PUBLIC_HOST:?Set SIGNALR_PUBLIC_HOST}
+      SIGNALR_PUBLIC_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}
       HTTPS_EXTRA_DOMAINS: signalr
       ConnectionStrings__DefaultConnection: Data Source=/data/messages.db
       JwtSettings__Issuer: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}/
+      OPENIDDICT_PFX_BASE64: ${OPENIDDICT_PFX_BASE64:?Set OPENIDDICT_PFX_BASE64}
+      OPENIDDICT_PFX_PASSWORD: ${OPENIDDICT_PFX_PASSWORD:?Set OPENIDDICT_PFX_PASSWORD}
       JwtSettings__CertificatePath: /app/cert.pfx
-      JwtSettings__CertificatePassword: ${XLabApiSettings__Security__CertificatePassword:?Set XLabApiSettings__Security__CertificatePassword}
       Security__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
       XlabAuth__BaseUrl: ${XLAB_AUTH_URL:-}
       Cors__Origins__0: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
@@ -185,38 +198,33 @@ services:
       SendService__Kafka__GroupId: xlab-selfhosted
       SendService__Api__ApiBaseUrl: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
       SendService__Api__SystemApiKey: ${XLabApiSettings__Security__SystemApiKey:?Set XLabApiSettings__Security__SystemApiKey}
-      SendService__Kafka__Topics__0__Name: push
-      SendService__Kafka__Topics__0__Id: 52fb5f88-cfcc-4e7a-baa8-609e9dec7e06
-      SendService__Kafka__Topics__0__Destination: FIREBASE
-      SendService__Kafka__Topics__0__ProviderSettings__MessagingUrl: https://fcm.googleapis.com/v1/projects/{0}/messages:send
+      SendService__Kafka__Topics__0__Name: xlab-client-commands
+      SendService__Kafka__Topics__0__Id: 539f3526-1b0e-49fd-8633-4fac8d47fe94
+      SendService__Kafka__Topics__0__Destination: SIGNALR
+      SendService__Kafka__Topics__0__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/ClientCommands
+      SendService__Kafka__Topics__0__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
       SendService__Kafka__Topics__0__ProviderSettings__IsTestMode: "false"
-      SendService__Kafka__Topics__1__Name: xlab-client-commands
-      SendService__Kafka__Topics__1__Id: 539f3526-1b0e-49fd-8633-4fac8d47fe94
+      SendService__Kafka__Topics__1__Name: signalr
+      SendService__Kafka__Topics__1__Id: cf20daca-869d-48d8-b886-b0669d2548ce
       SendService__Kafka__Topics__1__Destination: SIGNALR
-      SendService__Kafka__Topics__1__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/ClientCommands
+      SendService__Kafka__Topics__1__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
       SendService__Kafka__Topics__1__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
       SendService__Kafka__Topics__1__ProviderSettings__IsTestMode: "false"
-      SendService__Kafka__Topics__2__Name: signalr
-      SendService__Kafka__Topics__2__Id: cf20daca-869d-48d8-b886-b0669d2548ce
-      SendService__Kafka__Topics__2__Destination: SIGNALR
-      SendService__Kafka__Topics__2__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
-      SendService__Kafka__Topics__2__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
+      SendService__Kafka__Topics__2__Name: email
+      SendService__Kafka__Topics__2__Id: d3c1f1b1-99a2-4755-85bc-2cf60a1c9c7c
+      SendService__Kafka__Topics__2__Destination: MAIL
+      SendService__Kafka__Topics__2__ProviderSettings__Protocol: ${SMTP_PROTOCOL:-TLS}
+      SendService__Kafka__Topics__2__ProviderSettings__Port: ${SMTP_PORT:-587}
+      SendService__Kafka__Topics__2__ProviderSettings__Server: ${SMTP_HOST:-}
+      SendService__Kafka__Topics__2__ProviderSettings__Username: ${SMTP_USER:-}
+      SendService__Kafka__Topics__2__ProviderSettings__Password: ${SMTP_PASSWORD:-}
       SendService__Kafka__Topics__2__ProviderSettings__IsTestMode: "false"
-      SendService__Kafka__Topics__3__Name: email
-      SendService__Kafka__Topics__3__Id: d3c1f1b1-99a2-4755-85bc-2cf60a1c9c7c
-      SendService__Kafka__Topics__3__Destination: MAIL
-      SendService__Kafka__Topics__3__ProviderSettings__Protocol: ${SMTP_PROTOCOL:-TLS}
-      SendService__Kafka__Topics__3__ProviderSettings__Port: ${SMTP_PORT:-587}
-      SendService__Kafka__Topics__3__ProviderSettings__Server: ${SMTP_HOST:-}
-      SendService__Kafka__Topics__3__ProviderSettings__Username: ${SMTP_USER:-}
-      SendService__Kafka__Topics__3__ProviderSettings__Password: ${SMTP_PASSWORD:-}
+      SendService__Kafka__Topics__3__Name: xlab-signalr-notifications
+      SendService__Kafka__Topics__3__Id: f3633829-b956-45b8-bd36-71ed98c15dc3
+      SendService__Kafka__Topics__3__Destination: SIGNALR
+      SendService__Kafka__Topics__3__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
+      SendService__Kafka__Topics__3__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
       SendService__Kafka__Topics__3__ProviderSettings__IsTestMode: "false"
-      SendService__Kafka__Topics__4__Name: xlab-signalr-notifications
-      SendService__Kafka__Topics__4__Id: f3633829-b956-45b8-bd36-71ed98c15dc3
-      SendService__Kafka__Topics__4__Destination: SIGNALR
-      SendService__Kafka__Topics__4__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
-      SendService__Kafka__Topics__4__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
-      SendService__Kafka__Topics__4__ProviderSettings__IsTestMode: "false"
       SendService__Serilog__LogFilePath: /logs/send-service.log
       SendService__Serilog__IsLoggingEnabled: "true"
       SendService__Serilog__LogRotationTimeInDays: "7"
