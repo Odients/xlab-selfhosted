@@ -1,0 +1,270 @@
+# Self-hosted laboratory: API, web LIMS, SignalR, Redis, Kafka, SendService, SQL Server.
+# API, web, SignalR, SendService, and SQL Server are release images.
+# XLAB_REGISTRY defaults to Artifactory. Compose pulls tag latest and does not build them.
+# The web container writes the login address, OAuth client id, and hub URL at start.
+# Redis and Kafka are not published. SQL Server publishes 1433.
+# Public TLS ends at the reverse proxy. api:8080 and web:80 are plain HTTP.
+# signalr:443 is HTTPS with a certificate created at container start.
+
+services:
+  api:
+    image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlabapi:latest
+    pull_policy: always
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      XLabApiSettings__Database__RedisConnection: redis:6379
+      XLabApiSettings__Kafka__Enabled: "true"
+      XLabApiSettings__Kafka__BootstrapServers: broker:9092
+      XLabApiSettings__Kafka__ClientCommandsTopic__Name: xlab-client-commands
+      XLabApiSettings__Kafka__ClientCommandsTopic__Channel: SignalR
+      XLabApiSettings__Kafka__ClientCommandsTopic__Enabled: "true"
+      XLabApiSettings__Kafka__ToastTopic__Name: xlab-signalr-notifications
+      XLabApiSettings__Kafka__ToastTopic__Channel: SignalR
+      XLabApiSettings__Kafka__ToastTopic__Enabled: "true"
+      XLabApiSettings__Kafka__MailTopic__Name: email
+      XLabApiSettings__Kafka__MailTopic__Enabled: "true"
+      XLabApiSettings__XlabAuth__BaseUrl: ${XLAB_AUTH_URL:?Set XLAB_AUTH_URL}
+      XLabApiSettings__Security__AllowedOrigins__0: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
+      XLabApiSettings__Security__CertificatePassword: ${XLabApiSettings__Security__CertificatePassword:?Set XLabApiSettings__Security__CertificatePassword}
+      MSSQL_DATABASES: "${MSSQL_DATABASES:?Set MSSQL_DATABASES}"
+      MSSQL_XLAB_PASSWORD: "${MSSQL_XLAB_PASSWORD:?Set MSSQL_XLAB_PASSWORD}"
+    # Build the four API connection strings from MSSQL_DATABASES, then start the image entrypoint.
+    # A record with an empty role is ignored here. $$ is a literal $ for the shell.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -z "$${MSSQL_DATABASES:-}" ] || [ -z "$${MSSQL_XLAB_PASSWORD:-}" ]; then
+          echo "MSSQL_DATABASES and MSSQL_XLAB_PASSWORD are required." >&2
+          exit 1
+        fi
+        working=""
+        license=""
+        report=""
+        oauth=""
+        rest="$$MSSQL_DATABASES"
+        while [ -n "$$rest" ]; do
+          entry="$${rest%%;*}"
+          case "$$rest" in
+            *\;*) rest="$${rest#*;}" ;;
+            *) rest="" ;;
+          esac
+          [ -n "$$entry" ] || continue
+          name="$${entry%%|*}"
+          restfields="$${entry#*|}"
+          restfields="$${restfields#*|}"
+          role="$${restfields#*|}"
+          case "$$name" in
+            *[!A-Za-z0-9_]*|"") echo "Invalid database name: $$name" >&2; exit 1 ;;
+          esac
+          case "$$role" in
+            Working)
+              [ -z "$$working" ] || { echo "Only one Working database is allowed." >&2; exit 1; }
+              working="$$name" ;;
+            License)
+              [ -z "$$license" ] || { echo "Only one License database is allowed." >&2; exit 1; }
+              license="$$name" ;;
+            Report)
+              [ -z "$$report" ] || { echo "Only one Report database is allowed." >&2; exit 1; }
+              report="$$name" ;;
+            OpenIddict)
+              [ -z "$$oauth" ] || { echo "Only one OpenIddict database is allowed." >&2; exit 1; }
+              oauth="$$name" ;;
+            "") ;;
+            *) echo "Unknown API role '$$role' for database '$$name'." >&2; exit 1 ;;
+          esac
+        done
+        if [ -z "$$working" ] || [ -z "$$license" ] || [ -z "$$report" ] || [ -z "$$oauth" ]; then
+          echo "MSSQL_DATABASES must include Working, License, Report, and OpenIddict." >&2
+          exit 1
+        fi
+        password="$$(printf '%s' "$$MSSQL_XLAB_PASSWORD")"
+        export XLabApiSettings__Database__WorkingConnection="$$(printf 'Data Source=mssql,1433;Initial Catalog=%s;Integrated Security=False;TrustServerCertificate=True;User ID=xlab;Password=%s;Connection Timeout=30;Max Pool Size=200' "$$working" "$$password")"
+        export XLabApiSettings__Database__LicenseConnection="$$(printf 'Data Source=mssql,1433;Initial Catalog=%s;Integrated Security=False;TrustServerCertificate=True;User ID=xlab;Password=%s;Connection Timeout=600' "$$license" "$$password")"
+        export XLabApiSettings__Database__ReportConnection="$$(printf 'Data Source=mssql,1433;Initial Catalog=%s;Integrated Security=False;TrustServerCertificate=True;User ID=xlab;Password=%s;Connection Timeout=600' "$$report" "$$password")"
+        export XLabApiSettings__Database__OpenIddictConnection="$$(printf 'Data Source=mssql,1433;Initial Catalog=%s;Integrated Security=False;TrustServerCertificate=True;User ID=xlab;Password=%s;Connection Timeout=600' "$$oauth" "$$password")"
+        exec /entrypoint.sh
+    expose:
+      - "8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlablimsweb:latest
+    pull_policy: always
+    environment:
+      XL_AUTH_URL: ${XLAB_AUTH_URL:?Set XLAB_AUTH_URL}
+      XL_OAUTH_CLIENT_ID: ${XL_OAUTH_CLIENT_ID:?Set XL_OAUTH_CLIENT_ID from the partner card}
+      XL_RECAPTCHA_SITE_KEY: ${XL_RECAPTCHA_SITE_KEY:-}
+      XL_GTM_ID: ${XL_GTM_ID:-}
+      XL_DIAGNOSTICS: ${XL_DIAGNOSTICS:-}
+      XL_MESSAGE_HUB_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/messageHub
+      XLAB_AUTH_URL: ${XLAB_AUTH_URL:?Set XLAB_AUTH_URL}
+      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:-}
+      RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-false}
+      RECAPTCHA_MIN_SCORE: ${RECAPTCHA_MIN_SCORE:-0.5}
+      KANEO_BASE_URL: ${KANEO_BASE_URL:-}
+      KANEO_API_KEY: ${KANEO_API_KEY:-}
+      KANEO_PROJECT_ID: ${KANEO_PROJECT_ID:-}
+      KANEO_STATUS_SLUG: ${KANEO_STATUS_SLUG:-backlog}
+      UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET:-}
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  signalr:
+    image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlabsignalrservice:latest
+    pull_policy: always
+    hostname: signalr
+    environment:
+      HTTPS_DOMAINS: ${SIGNALR_PUBLIC_HOST:?Set SIGNALR_PUBLIC_HOST}
+      HTTPS_EXTRA_DOMAINS: signalr
+      ConnectionStrings__DefaultConnection: Data Source=/data/messages.db
+      JwtSettings__Issuer: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}/
+      JwtSettings__CertificatePath: /app/cert.pfx
+      JwtSettings__CertificatePassword: ${XLabApiSettings__Security__CertificatePassword:?Set XLabApiSettings__Security__CertificatePassword}
+      Security__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
+      XlabAuth__BaseUrl: ${XLAB_AUTH_URL:?Set XLAB_AUTH_URL}
+      Cors__Origins__0: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
+    volumes:
+      - signalr-data:/data
+    expose:
+      - "443"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  broker:
+    image: apache/kafka:latest
+    hostname: broker
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: "1"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_LOG_RETENTION_HOURS: "30"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 40s
+    restart: unless-stopped
+
+  sendservice:
+    image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlabsendservice:latest
+    pull_policy: always
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SendService__Kafka__BootstrapServers: broker:9092
+      SendService__Kafka__GroupId: xlab-selfhosted
+      SendService__Api__ApiBaseUrl: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
+      SendService__Api__SystemApiKey: ${XLabApiSettings__Security__SystemApiKey:?Set XLabApiSettings__Security__SystemApiKey}
+      SendService__Kafka__Topics__0__Name: push
+      SendService__Kafka__Topics__0__Id: 52fb5f88-cfcc-4e7a-baa8-609e9dec7e06
+      SendService__Kafka__Topics__0__Destination: FIREBASE
+      SendService__Kafka__Topics__0__ProviderSettings__MessagingUrl: https://fcm.googleapis.com/v1/projects/{0}/messages:send
+      SendService__Kafka__Topics__0__ProviderSettings__IsTestMode: "false"
+      SendService__Kafka__Topics__1__Name: xlab-client-commands
+      SendService__Kafka__Topics__1__Id: 539f3526-1b0e-49fd-8633-4fac8d47fe94
+      SendService__Kafka__Topics__1__Destination: SIGNALR
+      SendService__Kafka__Topics__1__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/ClientCommands
+      SendService__Kafka__Topics__1__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
+      SendService__Kafka__Topics__1__ProviderSettings__IsTestMode: "false"
+      SendService__Kafka__Topics__2__Name: signalr
+      SendService__Kafka__Topics__2__Id: cf20daca-869d-48d8-b886-b0669d2548ce
+      SendService__Kafka__Topics__2__Destination: SIGNALR
+      SendService__Kafka__Topics__2__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
+      SendService__Kafka__Topics__2__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
+      SendService__Kafka__Topics__2__ProviderSettings__IsTestMode: "false"
+      SendService__Kafka__Topics__3__Name: email
+      SendService__Kafka__Topics__3__Id: d3c1f1b1-99a2-4755-85bc-2cf60a1c9c7c
+      SendService__Kafka__Topics__3__Destination: MAIL
+      SendService__Kafka__Topics__3__ProviderSettings__Protocol: ${SMTP_PROTOCOL:-TLS}
+      SendService__Kafka__Topics__3__ProviderSettings__Port: ${SMTP_PORT:-587}
+      SendService__Kafka__Topics__3__ProviderSettings__Server: ${SMTP_HOST:-}
+      SendService__Kafka__Topics__3__ProviderSettings__Username: ${SMTP_USER:-}
+      SendService__Kafka__Topics__3__ProviderSettings__Password: ${SMTP_PASSWORD:-}
+      SendService__Kafka__Topics__3__ProviderSettings__IsTestMode: "false"
+      SendService__Kafka__Topics__4__Name: xlab-signalr-notifications
+      SendService__Kafka__Topics__4__Id: f3633829-b956-45b8-bd36-71ed98c15dc3
+      SendService__Kafka__Topics__4__Destination: SIGNALR
+      SendService__Kafka__Topics__4__ProviderSettings__Url: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/api/messages
+      SendService__Kafka__Topics__4__ProviderSettings__ApiKey: ${SIGNALR_API_KEY:?Set SIGNALR_API_KEY}
+      SendService__Kafka__Topics__4__ProviderSettings__IsTestMode: "false"
+      SendService__Serilog__LogFilePath: /logs/send-service.log
+      SendService__Serilog__IsLoggingEnabled: "true"
+      SendService__Serilog__LogRotationTimeInDays: "7"
+    volumes:
+      - send-logs:/logs
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mssql:
+    image: ${XLAB_REGISTRY:-artifactory.x-lab.pro/xlab-release}/xlab-mssql:latest
+    pull_policy: always
+    hostname: mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "${MSSQL_PID:-Developer}"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD}"
+      MSSQL_XLAB_PASSWORD: "${MSSQL_XLAB_PASSWORD:?Set MSSQL_XLAB_PASSWORD}"
+      MSSQL_DATABASES: "${MSSQL_DATABASES:?Set MSSQL_DATABASES}"
+      SQLCMDPASSWORD: "${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD}"
+      MSSQL_AGENT_ENABLED: "true"
+      MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
+      TZ: UTC
+    ports:
+      - "${MSSQL_PUBLISH_PORT:-1433}:1433"
+    volumes:
+      - /data/xlab/mssql:/var/opt/mssql
+    shm_size: ${MSSQL_SHM_SIZE:-1gb}
+    mem_limit: ${MSSQL_CONTAINER_MEMORY:-3g}
+    healthcheck:
+      test: ["CMD", "/bin/bash", "/opt/xlab/healthcheck.sh"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  kafka-data:
+  send-logs:
+  signalr-data:
