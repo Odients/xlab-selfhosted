@@ -32,7 +32,7 @@ xlab-license → api (синхронизация организаций и со�
 SendService → публичный HTTPS signalr
 ```
 
-База биллинга — Postgres xlab-license. Роль `License` в `MSSQL_DATABASES` — это по-прежнему база SQL Server, к которой API подключается как к каталогу лицензий. Её не заменяет Postgres.
+База биллинга — Postgres xlab-license. SQL Server эту базу не хранит.
 
 ## Карточка партнёра в xlab-license
 
@@ -47,11 +47,10 @@ SendService → публичный HTTPS signalr
 
 Кнопка подготовки файла окружения есть только у своего API и у карточки вендора. Она заново выпускает HMAC, ключ записи в xlab-auth, секрет клиента API и ключ подписи, затем отдаёт строки для этого API. Предыдущие ключи после этого перестают подходить: новый файл нужно положить в `.env` и перезапустить `api`.
 
-В файл попадают семь строк. Пять копируются в `.env` как есть:
+В файл попадают шесть строк. Четыре копируются в `.env` как есть:
 
 ```text
 XLabApiSettings__Security__LicenseServiceClientSecret=...
-XLabApiSettings__LicenseService__UseRuntimeProxy=true
 XLabApiSettings__LicenseService__BaseUrl=https://license.example.com
 XLabApiSettings__LicenseService__HmacKey=...
 XLabApiSettings__LicenseService__HmacKeyPrevious=
@@ -71,7 +70,7 @@ XLabApiSettings__LicenseService__HmacKeyPrevious=
 | `CORS_ORIGINS` | сайт LIMS туда не нужен: браузер биллинг не вызывает |
 | `LICENSE_OPS_JWT_SECRET`, `VENDOR_OPS_*`, `DATABASE_URL`, SMTP пробного доступа | остаются на хосте биллинга. В этот compose они не входят |
 
-На xlab-auth в список разрешённых источников браузера добавьте `WEB_PUBLIC_URL`. Иначе страница входа не примет возврат с этого сайта.
+Сайт показывает свою страницу входа. Логин и пароль уходят на `API_PUBLIC_URL` и сверяются с `Org_Staff`. Адрес xlab-auth для этого входа не нужен: оставьте `XLAB_AUTH_URL` пустым.
 
 ## Запуск
 
@@ -112,8 +111,8 @@ docker compose up -d
 | `WEB_PUBLIC_URL` | да | | CORS API и SignalR. Карточка: `LimsWebUrl`. Источник браузера, без пути и без слэша |
 | `SIGNALR_PUBLIC_URL` | да | | SendService вызывает `…/api/messages` и `…/api/ClientCommands`. Сайт пишет в конфиг `…/messageHub` |
 | `SIGNALR_PUBLIC_HOST` | да | | только имя хоста, первая запись в сертификате HTTPS контейнера SignalR. Совпадает с хостом в `SIGNALR_PUBLIC_URL` |
-| `XLAB_AUTH_URL` | да | | сайт: `XL_AUTH_URL` и `XLAB_AUTH_URL`. API: `XLabApiSettings__XlabAuth__BaseUrl`. SignalR: проверка токена ES256 через `{адрес}/jwks`. Без слэша на конце |
-| `XL_OAUTH_CLIENT_ID` | да | | сайт при старте. `OauthClientId` с карточки |
+| `XLAB_AUTH_URL` | нет | пусто | Если пусто, сайт входит сам, API проверяет `Org_Staff`, SignalR принимает токен API. Непустой адрес включает проверку токена ES256 на SignalR |
+| `XL_OAUTH_CLIENT_ID` | нет | пусто | Сайт своего сервера его не читает |
 
 SendService ходит на **публичный** адрес SignalR. Внутреннее имя `signalr` в сертификат тоже попадает, но сертификат самоподписанный, а SendService проверяет TLS. Публичный прокси должен предъявлять настоящий сертификат.
 
@@ -138,7 +137,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | Имя | Обязательно | По умолчанию | Куда попадает |
 |---|---|---|---|
 | `MSSQL_SA_PASSWORD` | да | | учётная запись `sa` |
-| `MSSQL_XLAB_PASSWORD` | да | | учётная запись `xlab` и пароль API к четырём базам |
+| `MSSQL_XLAB_PASSWORD` | да | | учётная запись `xlab` и пароль API к рабочей базе и базе протоколов |
 | `MSSQL_DATABASES` | да | | список баз. Формат ниже |
 | `MSSQL_PID` | нет | `Developer` | ключ продукта. Пусто — редакция Developer |
 | `MSSQL_MEMORY_LIMIT_MB` | нет | `2048` | потолок памяти SQL Server, МБ. Ниже потолка контейнера |
@@ -150,19 +149,17 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 | Роль | Что делает API |
 |---|---|
-| `Working` | рабочая база. Задания Agent смотрят сюда |
-| `License` | база лицензий SQL Server |
+| `Working` | рабочая база. Задания Agent и таблицы OpenIddict смотрят сюда |
 | `Report` | база протоколов |
-| `OpenIddict` | база токенов рабочего места |
 | пустая | база подключена, `xlab` — `db_owner`, API к ней не ходит |
 
-Все четыре имени обязательны. Пустая роль повторяется. Пример одной строкой:
+Обязательны `Working` и `Report`. Пустая роль повторяется. Пример одной строкой:
 
 ```text
-XLab|XLab.mdf|XLab_log.ldf|Working;xlab_lic|xlab_lic.mdf|xlab_lic_log.ldf|License;XLabReport|XLabReport.mdf|XLabReport_log.ldf|Report;OAuthDb|OAuthDb.mdf|OAuthDb_log.ldf|OpenIddict
+XLab|XLab.mdf|XLab_log.ldf|Working;XLabReport|XLabReport.mdf|XLabReport_log.ldf|Report
 ```
 
-Имена файлов — те, что уже лежат в `/data/xlab/mssql/data`. Compose собирает четыре строки подключения на `mssql,1433` от пользователя `xlab`. Строка подключения, записанная в Coolify вручную, не используется.
+Имена файлов — те, что уже лежат в `/data/xlab/mssql/data`. Compose собирает две строки подключения на `mssql,1433` от пользователя `xlab`. Строка подключения, записанная в Coolify вручную, не используется.
 
 Часы контейнера — UTC. `ArchiveWork` в 21:00 UTC. `StopTrackingTime` смотрит на 08:00–18:00 UTC.
 
@@ -179,13 +176,25 @@ XLab|XLab.mdf|XLab_log.ldf|Working;xlab_lic|xlab_lic.mdf|xlab_lic_log.ldf|Licens
 | Имя | Обязательно | По умолчанию | Смысл |
 |---|---|---|---|
 | `XLabApiSettings__Security__LicenseServiceClientSecret` | да | | секрет клиента OpenIddict, которым xlab-license ходит на этот API. Хранится на карточке своего API |
-| `XLabApiSettings__LicenseService__UseRuntimeProxy` | да | `true` в примере | `true`: проверка лицензии идёт в xlab-license, подпись HMAC |
 | `XLabApiSettings__LicenseService__BaseUrl` | да | | публичный адрес xlab-license, без требования слэша на конце |
 | `XLabApiSettings__LicenseService__HmacKey` | да | | HMAC этой карточки. Тот же секрет, которым сервис лицензий подписывает ответ |
 | `XLabApiSettings__LicenseService__HmacKeyPrevious` | да, может быть пустым | пусто | предыдущий HMAC на время смены ключа. Свежая подготовка оставляет пустым |
 | `XLabApiSettings__XlabAuth__InternalKey` | когда API должен писать сотрудников в xlab-auth | | ключ заголовка записи. Та же строка, что на карточке. Compose её не затирает |
 
-`UseRuntimeProxy=false` или пустой HMAC отключают живой запрос лицензии.
+Пустой HMAC или пустой `BaseUrl` делают лицензию недействительной, если файл оффлайн-лицензии не задан: живой запрос не проходит проверку.
+
+### Оффлайн-лицензия
+
+Если задан файл лицензии, `GetMyLicense` не ходит в xlab-license. Две строки приходят с кнопки на лицензии организации, у тарифа которой включён свой сервер. Каждое нажатие выпускает новый ключ установки и новый файл; старый файл перестаёт подходить. Логин и пароль суперадмина в файл не входят.
+
+| Имя | Обязательно | Смысл |
+|---|---|---|
+| `XLabApiSettings__OfflineLicense__PrivateKey` | вместе с файлом | закрытый ключ установки, одна строка base64 |
+| `XLabApiSettings__OfflineLicense__Document` | вместе с ключом | файл лицензии, одна строка base64 |
+| `XLabApiSettings__OfflineLicense__AdminLogin` | вместе с файлом | логин суперадмина |
+| `XLabApiSettings__OfflineLicense__AdminPassword` | вместе с файлом | пароль суперадмина |
+
+При старте API проверяет подпись и расшифровку. Пустой логин, пустой пароль или битый файл не дают процессу подняться. В рабочей базе остаётся организация из файла: остальные организации и их сотрудники удаляются. Образцы и работы чужих организаций не стираются; если на них ещё есть ссылки, старт останавливается. Суперадмина создают, если его нет, и обновляют логин с паролем, если он уже есть. Пароль лежит только в `Org_Staff`. Сотрудники и их пароли в xlab-license не отправляются. Вход по паролю проверяет эта же таблица. Диск самохостинга не измеряется и не делает лицензию недействительной.
 
 ### Сайт LIMS
 
@@ -286,7 +295,7 @@ Compose уже задаёт темы Kafka. Имена совпадают с т�
 | `api` | темы Kafka | `xlab-client-commands`, `xlab-signalr-notifications`, `email` |
 | `api` | `XLabApiSettings__XlabAuth__BaseUrl` | `XLAB_AUTH_URL` |
 | `api` | `XLabApiSettings__Security__AllowedOrigins__0` | `WEB_PUBLIC_URL` |
-| `api` | четыре строки подключения | `mssql,1433`, пользователь `xlab`, базы из `MSSQL_DATABASES` |
+| `api` | две строки подключения | `mssql,1433`, пользователь `xlab`, базы из `MSSQL_DATABASES` |
 | `signalr` | `JwtSettings__Issuer` | `API_PUBLIC_URL` со слэшем на конце |
 | `signalr` | `JwtSettings__CertificatePath` | `/app/cert.pfx` |
 | `signalr` | `XlabAuth__BaseUrl` | `XLAB_AUTH_URL` |
@@ -333,8 +342,8 @@ http:
 ## Проверка
 
 1. `api` слушает HTTP 8080 и дожидается healthy у Redis, Kafka и SQL Server.
-2. Сайт открывается по `WEB_PUBLIC_URL`, уходит на `XLAB_AUTH_URL` и возвращается.
+2. Сайт открывается по `WEB_PUBLIC_URL` и показывает свой вход. После входа сессия живёт на `API_PUBLIC_URL`.
 3. После входа запросы идут на `API_PUBLIC_URL`, а не на внутреннее имя `api`.
-4. В консоли браузера нет отказа negotiate на `{SIGNALR_PUBLIC_URL}/messageHub`. Отказ 401 значит, что издатель токена и `XLAB_AUTH_URL` на SignalR различаются.
+4. В консоли браузера нет отказа negotiate на `{SIGNALR_PUBLIC_URL}/messageHub`. Отказ 401 при пустом `XLAB_AUTH_URL` значит, что издатель токена не совпал с `API_PUBLIC_URL`.
 5. `POST` на `{SIGNALR_PUBLIC_URL}/api/messages` с заголовком `API-Key: SIGNALR_API_KEY` отвечает 201.
 6. Карточка xlab-license с этим `ApiBaseUrl` синхронизирует организацию. Пустой HMAC или другой секрет клиента даёт отказ.
