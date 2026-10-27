@@ -8,13 +8,13 @@ Docker Compose для лаборатории, которая держит сво
 
 | Сервис | Образ | Порт внутри сети | Кто снаружи |
 |---|---|---|---|
-| `api` | `xlabapi:latest` | HTTP 8080 | браузер, рабочее место, SendService |
-| `web` | `xlablimsweb:latest` | HTTP 80 | браузер |
-| `signalr` | `xlabsignalrservice:latest` | HTTPS 443 | браузер (`/messageHub`), SendService (`/api/messages`, `/api/ClientCommands`) |
+| `api` | `xlabapi:latest` | HTTP 8082 | браузер, рабочее место, SendService |
+| `web` | `xlablimsweb:latest` | HTTP 8081 | браузер |
+| `signalr` | `xlabsignalrservice:latest` | HTTPS 8083 | браузер (`/messageHub`), SendService (`/api/messages`, `/api/ClientCommands`) |
 | `redis` | `redis:7-alpine` | 6379 | только API |
 | `broker` | `apache/kafka` | 9092 | API и SendService |
 | `sendservice` | `xlabsendservice:latest` | нет | почта и публичный адрес SignalR |
-| `mssql` | `xlab-mssql:latest` | 1433, на хосте тоже 1433 | API |
+| `mssql` | `xlab-mssql:latest` | 1433, на хосте `MSSQL_PUBLISH_PORT` (по умолчанию 1433) | API |
 
 Один и тот же `cert.pfx` API и SignalR при каждом старте заново записывают из `OPENIDDICT_PFX_BASE64`. Старый файл в контейнере не остаётся. В образ он не входит. Пароль один: `OPENIDDICT_PFX_PASSWORD`. HTTPS-сертификат SignalR по-прежнему выпускается при старте и к этому файлу не относится.
 
@@ -50,15 +50,19 @@ cp .env.example .env
 
 Заполните `.env`. Пароли и ключи с символом `$` в Coolify помечайте **Literal**. Файл `.env` не коммитится.
 
-Каталог данных SQL Server на хосте, до первого старта:
+Каталог данных SQL Server на хосте, до первого старта. В командах подставьте путь из `MSSQL_DATA_PATH`:
 
 ```bash
-sudo mkdir -p /data/xlab/mssql
-sudo chown -R 10001:0 /data/xlab/mssql
-sudo chmod -R 770 /data/xlab/mssql
+sudo mkdir -p /data/xlab/mssql2
+sudo chown -R 10001:0 /data/xlab/mssql2
+sudo chmod -R 770 /data/xlab/mssql2
 ```
 
-`10001` — пользователь `mssql` внутри образа. Файлы баз лежат в `/data/xlab/mssql/data`, копии — в `/data/xlab/mssql/backup`. Рядом появятся системные базы, `log` и `secrets`. Каталог `secrets` не удалять. Сам каталог не класть в git: Coolify заново клонирует репозиторий при выкладке.
+`10001` — пользователь `mssql` внутри образа. `MSSQL_DATA_PATH` монтируется как `/var/opt/mssql`. Файлы баз лежат в `data` внутри этого каталога, копии — в `backup`. Рядом появятся системные базы, `log` и `secrets`. Каталог `secrets` не удалять. Сам каталог не класть в git: Coolify заново клонирует репозиторий при выкладке.
+
+Два стека на одном хосте — два каталога. Блокировка SQL Server лежит в этом каталоге, поэтому второй контейнер на том же пути останавливается с сообщением «Another instance of the application is already running». Другой `MSSQL_PUBLISH_PORT` это не снимает. Уже запущенный комбайн оставьте на `/data/xlab/mssql`.
+
+Coolify при чтении compose записывает путь из строки тома после `:-` и дальше не смотрит на значение `MSSQL_DATA_PATH`. Сейчас это `/data/xlab/mssql2`. Форма `:?` в томе даёт ошибку про недопустимый символ. После правки файла заново прочитайте compose в Coolify и выложите стек.
 
 ```bash
 docker compose up -d
@@ -122,7 +126,8 @@ rm -f cert.key cert.crt cert.pfx
 | `MSSQL_MEMORY_LIMIT_MB` | нет | `2048` | потолок памяти SQL Server, МБ. Ниже потолка контейнера |
 | `MSSQL_CONTAINER_MEMORY` | нет | `3g` | потолок памяти контейнера (`3g`, `4096m`) |
 | `MSSQL_SHM_SIZE` | нет | `1gb` | `/dev/shm`. Берётся из памяти контейнера, сверху не прибавляется |
-| `MSSQL_PUBLISH_PORT` | нет | `1433` | порт SQL Server на хосте. В файрволе оставьте его лабораторной сети |
+| `MSSQL_PUBLISH_PORT` | нет | `1433` | порт SQL Server на хосте. Внутри сети стека порт остаётся 1433. В файрволе оставьте его лабораторной сети |
+| `MSSQL_DATA_PATH` | нет | `/data/xlab/mssql2` | каталог на хосте, смонтированный как `/var/opt/mssql`. В Coolify действует путь после `:-` в compose, а не значение этой переменной |
 
 Одна база: `Имя|ФайлДанных|ФайлЖурнала|Роль`. Несколько баз через `;`.
 
@@ -138,7 +143,7 @@ rm -f cert.key cert.crt cert.pfx
 XLab|XLab.mdf|XLab_log.ldf|Working;XLabReport|XLabReport.mdf|XLabReport_log.ldf|Report
 ```
 
-Имена файлов — те, что уже лежат в `/data/xlab/mssql/data`. Compose собирает две строки подключения на `mssql,1433` от пользователя `xlab`. Строка подключения, записанная в Coolify вручную, не используется.
+Имена файлов — те, что уже лежат в `data` внутри `MSSQL_DATA_PATH`. Compose собирает две строки подключения на `mssql,1433` от пользователя `xlab`. Строка подключения, записанная в Coolify вручную, не используется.
 
 Часы контейнера — UTC. `ArchiveWork` в 21:00 UTC. `StopTrackingTime` смотрит на 08:00–18:00 UTC.
 
@@ -146,7 +151,7 @@ XLab|XLab.mdf|XLab_log.ldf|Working;XLabReport|XLabReport.mdf|XLabReport_log.ldf|
 
 При каждом старте образ подключает базу из списка, если её ещё нет, заново ставит оба пароля и создаёт два задания Agent, если их ещё нет в `msdb`. Уровень совместимости файлов не меняется.
 
-Порт 1433 наружу есть. Публичный домен на `mssql` не вешать.
+Наружу открыт `MSSQL_PUBLISH_PORT` (по умолчанию 1433). Публичный домен на `mssql` не вешать.
 
 ### Оффлайн-лицензия
 
@@ -234,6 +239,7 @@ Compose уже задаёт темы Kafka. Имена совпадают с т�
 | `sendservice` | `SendService__Api__ApiBaseUrl` | `API_PUBLIC_URL` |
 | `web` | `XL_SELF_HOSTED` | `true` |
 | `web` | `XL_API_URL`, `XL_MESSAGE_HUB_URL` | `API_PUBLIC_URL` и `{SIGNALR_PUBLIC_URL}/messageHub` |
+| `web` | `ALFA_CLIENT_ID`, `ALFA_CLIENT_SECRET` | ключи приложения Альфа-Банка из `.env`. Пустые выключают вход в банк |
 
 Redis и Kafka наружу не публикуются. У SendService нет порта. Проверку живости HTTP для него не включать: слушать нечего. Журнал: том `send-logs`, файл `/logs/send-service.log`. Сообщения SignalR: том `signalr-data`, файл `/data/messages.db`.
 
@@ -243,13 +249,13 @@ Redis и Kafka наружу не публикуются. У SendService нет �
 
 | Сервис | Порт контейнера | Схема до контейнера |
 |---|---|---|
-| `api` | 8080 | HTTP. Сертификат только на прокси |
-| `web` | 80 | HTTP. Прокси отдаёт файлы Angular сам не должен: POST на `index.html` отвечает 405 |
-| `signalr` | 443 | HTTPS. Сертификат в контейнере самоподписанный |
+| `api` | 8082 | HTTP. Сертификат только на прокси |
+| `web` | 8081 | HTTP. Прокси отдаёт файлы Angular сам не должен: POST на `index.html` отвечает 405 |
+| `signalr` | 8083 | HTTPS. Сертификат в контейнере самоподписанный |
 
-Проверка живости: у `web` это `GET /health` с ответом 200. У `api` свой HTTP-порт 8080. У `signalr` образ проверяет TLS на `127.0.0.1:443`. У SendService HTTP-проверку не включать.
+Проверка живости: у `web` это `GET /health` с ответом 200. У `api` свой HTTP-порт 8082. У `signalr` образ проверяет TLS на `127.0.0.1:8083`. У SendService HTTP-проверку не включать.
 
-Для SignalR прокси должен идти на контейнер по HTTPS и не проверять самоподписанный сертификат. На приложении Coolify выключите **Readonly labels**, порт экспозиции поставьте `443` и допишите две метки. Имя службы — `https-0-` и UUID приложения, когда публичный адрес начинается с `https://`:
+Для SignalR прокси должен идти на контейнер по HTTPS и не проверять самоподписанный сертификат. На приложении Coolify выключите **Readonly labels**, порт экспозиции поставьте `8083` и допишите две метки. Имя службы — `https-0-` и UUID приложения, когда публичный адрес начинается с `https://`:
 
 ```text
 traefik.http.services.https-0-<uuid>.loadbalancer.server.scheme=https
@@ -265,13 +271,35 @@ http:
       insecureSkipVerify: true
 ```
 
+### Свой nginx
+
+На Coolify этот блок не включайте: порты 80 и 443 там уже заняты прокси Coolify. Сервисы `proxy` и `acme` в compose закомментированы. Их включают на машине, где эти порты свободны.
+
+Nginx принимает посетителей и передаёт запрос дальше: сайт на порт 8081, API на 8082, SignalR на 8083. Снаружи один сертификат на три имени. До контейнера SignalR nginx идёт по его внутреннему HTTPS и не проверяет самоподписанный сертификат. Соединение хаба долгое, nginx его не обрывает.
+
+Два режима. Переключатель — `PROXY_CERT_MODE`.
+
+Свои сертификаты (`own`). В каталог `CERTS_PATH` кладут два файла: `fullchain.pem` (сам сертификат и промежуточные) и `privkey.pem` (закрытый ключ без пароля). В сертификате должны быть все три имени из адресов сайта, API и SignalR. Сервис `acme` можно не раскомментировать. Если файлов ещё нет, nginx на два дня выпускает самоподписанный сертификат, и браузер показывает предупреждение.
+
+Let's Encrypt (`letsencrypt`). Как в mailcow: отдельный контейнер получает сертификат. Срок около 90 дней. Тот же контейнер несколько раз в сутки проверяет дату и примерно за месяц до конца сам запрашивает новый. Проверка при выпуске и при продлении идёт по обычному HTTP на порт 80, поэтому все три имени в DNS должны и дальше указывать на этот сервер, а порты 80 и 443 оставаться открытыми. Пока настоящий сертификат не получен, сайт открывается с временным самоподписанным. Когда файлы появляются или заменяются при продлении, nginx перечитывает их сам, весь стек перезапускать не нужно. Свои файлы в режиме `own` так не обновляются: новый сертификат кладёт администратор.
+
+Раскомментируйте сервис `proxy`. Для Let's Encrypt ещё сервис `acme` и два тома `acme-state` и `acme-webroot` в конце файла. Каталог сертификатов создайте до первого запуска: `mkdir -p /data/xlab/certs`.
+
+| Имя | Обязательно | По умолчанию | Что это |
+|---|---|---|---|
+| `PROXY_CERT_MODE` | нет | `own` | `own` — положить свои два файла. `letsencrypt` — получить сертификат у Let's Encrypt и примерно за месяц до конца срока запросить новый |
+| `CERTS_PATH` | нет | `/data/xlab/certs` | папка на сервере, где лежат `fullchain.pem` и `privkey.pem` |
+| `ACME_EMAIL` | для Let's Encrypt | | почта учётки Let's Encrypt. На неё приходит письмо, когда срок сертификата подходит к концу |
+| `PROXY_HTTP_PORT` | нет | `80` | порт на хосте для проверки Let's Encrypt и для переадресации обычного HTTP на HTTPS |
+| `PROXY_HTTPS_PORT` | нет | `443` | порт на хосте, по которому открывают сайт, API и SignalR |
+
 Отдельные сети в этом файле не объявлены. Coolify сам подключает прокси к нужным сервисам.
 
 Реестр образов — Artifactory (`XLAB_REGISTRY`). Учётная запись Docker на хосте должна иметь право тянуть `xlab-release`.
 
 ## Проверка
 
-1. `api` слушает HTTP 8080 и дожидается healthy у Redis, Kafka и SQL Server.
+1. `api` слушает HTTP 8082 и дожидается healthy у Redis, Kafka и SQL Server.
 2. Сайт открывается по `WEB_PUBLIC_URL` и показывает свой вход. После входа сессия живёт на `API_PUBLIC_URL`.
 3. После входа запросы идут на `API_PUBLIC_URL`, а не на внутреннее имя `api`.
 4. В консоли браузера нет отказа negotiate на `{SIGNALR_PUBLIC_URL}/messageHub`. Отказ 401 при пустом `XLAB_AUTH_URL` значит, что издатель токена не совпал с `API_PUBLIC_URL`.

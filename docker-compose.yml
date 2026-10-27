@@ -2,9 +2,12 @@
 # API, web, SignalR, SendService, and SQL Server are release images.
 # XLAB_REGISTRY defaults to Artifactory. Compose pulls tag latest and does not build them.
 # The web container writes the self-hosted login flag, API address, and hub URL at start.
-# Redis and Kafka are not published. SQL Server publishes 1433.
-# Public TLS ends at the reverse proxy. api:8080 and web:80 are plain HTTP.
-# signalr:443 is HTTPS with a certificate created at container start.
+# Redis and Kafka are not published. SQL Server publishes MSSQL_PUBLISH_PORT (default 1433).
+# Database files are in the path after :- below. Coolify stores that path when it
+# reads the file and does not apply a later MSSQL_DATA_PATH value. Do not use :?.
+# Public TLS ends at the reverse proxy. api:8082 and web:8081 are plain HTTP.
+# signalr:8083 is HTTPS with a certificate created at container start.
+# Optional nginx and acme are commented at the bottom. Leave them commented on Coolify.
 
 services:
   api:
@@ -86,7 +89,7 @@ services:
         export XLabApiSettings__Database__ReportConnection="$$(printf 'Data Source=mssql,1433;Initial Catalog=%s;Integrated Security=False;TrustServerCertificate=True;User ID=xlab;Password=%s;Connection Timeout=600' "$$report" "$$password")"
         exec /entrypoint.sh
     expose:
-      - "8080"
+      - "8082"
     depends_on:
       redis:
         condition: service_healthy
@@ -106,8 +109,10 @@ services:
       XL_OAUTH_CLIENT_ID: ${XL_OAUTH_CLIENT_ID:-}
       XL_MESSAGE_HUB_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}/messageHub
       XLAB_AUTH_URL: ${XLAB_AUTH_URL:-}
+      ALFA_CLIENT_ID: ${ALFA_CLIENT_ID:-}
+      ALFA_CLIENT_SECRET: ${ALFA_CLIENT_SECRET:-}
     expose:
-      - "80"
+      - "8081"
     restart: unless-stopped
 
   signalr:
@@ -142,12 +147,12 @@ services:
     volumes:
       - signalr-data:/data
     expose:
-      - "443"
+      - "8083"
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    command: ["redis-server", "--save", "", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
     healthcheck:
@@ -252,7 +257,7 @@ services:
     ports:
       - "${MSSQL_PUBLISH_PORT:-1433}:1433"
     volumes:
-      - /data/xlab/mssql:/var/opt/mssql
+      - ${MSSQL_DATA_PATH:-/data/xlab/mssql2}:/var/opt/mssql
     shm_size: ${MSSQL_SHM_SIZE:-1gb}
     mem_limit: ${MSSQL_CONTAINER_MEMORY:-3g}
     healthcheck:
@@ -263,8 +268,56 @@ services:
       start_period: 120s
     restart: unless-stopped
 
+  # Own reverse proxy, for a machine where ports 80 and 443 are free.
+  # Leave this commented on Coolify: Traefik already owns those ports.
+  # Uncomment service proxy. For Let's Encrypt also uncomment service acme
+  # and the two volume names at the bottom of this file.
+  # Set PROXY_CERT_MODE=own or letsencrypt. See README, section "Свой nginx".
+  #
+  # proxy:
+  #   image: nginx:1.27-alpine
+  #   entrypoint: ["/bin/sh", "/opt/xlab/nginx-entry.sh"]
+  #   environment:
+  #     WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
+  #     API_PUBLIC_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
+  #     SIGNALR_PUBLIC_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}
+  #     NGINX_ENVSUBST_FILTER: "^(WEB_HOST|API_HOST|SIGNALR_HOST)$"
+  #   ports:
+  #     - "${PROXY_HTTP_PORT:-80}:80"
+  #     - "${PROXY_HTTPS_PORT:-443}:443"
+  #   volumes:
+  #     - ${CERTS_PATH:-/data/xlab/certs}:/certs
+  #     - ./proxy/nginx-entry.sh:/opt/xlab/nginx-entry.sh:ro
+  #     - ./proxy/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+  #     - acme-webroot:/var/www/acme
+  #   depends_on:
+  #     - web
+  #     - api
+  #     - signalr
+  #   restart: unless-stopped
+  #
+  # acme:
+  #   image: neilpang/acme.sh:latest
+  #   entrypoint: ["/bin/sh", "/opt/xlab/acme-entry.sh"]
+  #   environment:
+  #     PROXY_CERT_MODE: ${PROXY_CERT_MODE:-own}
+  #     ACME_EMAIL: ${ACME_EMAIL:-}
+  #     WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:?Set WEB_PUBLIC_URL}
+  #     API_PUBLIC_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
+  #     SIGNALR_PUBLIC_URL: ${SIGNALR_PUBLIC_URL:?Set SIGNALR_PUBLIC_URL}
+  #   volumes:
+  #     - ${CERTS_PATH:-/data/xlab/certs}:/certs
+  #     - ./proxy/acme-entry.sh:/opt/xlab/acme-entry.sh:ro
+  #     - acme-state:/acme.sh
+  #     - acme-webroot:/var/www/acme
+  #   depends_on:
+  #     - proxy
+  #   restart: unless-stopped
+
 volumes:
   redis-data:
   kafka-data:
   send-logs:
   signalr-data:
+  # acme-state:
+  # acme-webroot:
